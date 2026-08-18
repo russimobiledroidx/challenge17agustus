@@ -506,7 +506,31 @@ async function start() {
     throw new Error(`method tidak dikenal: ${method}`);
   };
 
-  app.get('/api/duplicates/find', { schema: { tags: ['duplicates'], summary: 'Find duplicates' } }, async (req, reply) => {
+  app.get('/api/duplicates/find', {
+    schema: {
+      tags: ['duplicates'],
+      summary: 'Find duplicate accounts',
+      description: 'Find duplicate users by various methods (ip_address, email, phone, order_history, activity_pattern)',
+      querystring: {
+        type: 'object',
+        properties: {
+          method: {
+            type: 'string',
+            enum: ['ip_address', 'email', 'phone', 'order_history', 'activity_pattern'],
+            default: 'ip_address',
+            description: 'Detection method'
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 200,
+            default: 50,
+            description: 'Max groups to return'
+          }
+        }
+      }
+    }
+  }, async (req, reply) => {
     const method = (req.query.method ?? 'ip_address').toString();
     const limit = Math.min(Math.max(parseInt(req.query.limit ?? '50', 10) || 50, 1), 200);
     const METHODS = ['ip_address', 'email', 'phone', 'order_history', 'activity_pattern'];
@@ -532,7 +556,23 @@ async function start() {
   });
 
   // Varian per-user yang disebut bagian "Submission".
-  app.get('/api/duplicates/:user_id', { schema: { tags: ['duplicates'], summary: 'User duplicates' } }, async (req, reply) => {
+  app.get('/api/duplicates/:user_id', {
+    schema: {
+      tags: ['duplicates'],
+      summary: 'Find duplicates for specific user',
+      description: 'Get potential duplicate accounts for a user based on email, phone, and name similarity',
+      params: {
+        type: 'object',
+        required: ['user_id'],
+        properties: {
+          user_id: {
+            type: 'integer',
+            description: 'User ID'
+          }
+        }
+      }
+    }
+  }, async (req, reply) => {
     const t0 = now();
     const id = parseInt(req.params.user_id, 10);
     if (!Number.isFinite(id)) return reply.code(400).send({ error: 'user_id harus angka' });
@@ -555,7 +595,35 @@ async function start() {
   });
 
   // ---------------- Round 5: user profile (JOIN 4 tabel) ----------------
-  app.get('/api/user-profile/:user_id', { schema: { tags: ['profile'], summary: 'User profile' } }, async (req, reply) => {
+  app.get('/api/user-profile/:user_id', {
+    schema: {
+      tags: ['profile'],
+      summary: 'User profile with orders, transactions, activities',
+      description: 'Get complete user profile (4-table JOIN: user + orders + transactions + activities)',
+      params: {
+        type: 'object',
+        required: ['user_id'],
+        properties: {
+          user_id: {
+            type: 'integer',
+            description: 'User ID'
+          }
+        }
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            profile: { type: 'object' },
+            orders: { type: 'object' },
+            transactions: { type: 'object' },
+            activity: { type: 'object' },
+            took_ms: { type: 'number' }
+          }
+        }
+      }
+    }
+  }, async (req, reply) => {
     const t0 = now();
     const id = parseInt(req.params.user_id, 10);
     if (!Number.isFinite(id)) return reply.code(400).send({ error: 'user_id harus angka' });
