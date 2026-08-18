@@ -4,12 +4,14 @@
 
 Platform analisis data pelanggan yang menangani 15 juta customer records dengan performa tinggi dan stabilitas di bawah beban konkuren.
 
+**Developer:** Russi
+
 ---
 
 ## 📊 Overview
 
 - **Dataset:** 15 juta customer records (3.8 GB PostgreSQL)
-- **Stack:** Node.js (Fastify) + PostgreSQL 14
+- **Stack:** Node.js (Fastify) + PostgreSQL 14 + PM2
 - **Performance:** 1,377 req/s @ 100 concurrent (p99: 181ms)
 - **Uptime:** Zero crashes under sustained load
 
@@ -21,38 +23,70 @@ Platform analisis data pelanggan yang menangani 15 juta customer records dengan 
 
 ### Prerequisites
 
-- Docker & Docker Compose
-- Node.js 18+ (untuk development)
+- Docker & Docker Compose (untuk database)
+- Node.js 20+ 
+- PM2 (process manager)
 - 4GB RAM minimum
 
-### Setup (5 menit)
+### Setup
 
 ```bash
 # 1. Clone repository
-git clone <repo-url>
+git clone https://github.com/russimobiledroidx/challenge17agustus
 cd challenge-api
 
-# 2. Environment variables
-cp .env.example .env
-# Edit .env dengan database credentials
+# 2. Install dependencies
+npm install
+npm install -g pm2
 
-# 3. Start services
+# 3. Setup database (Docker)
 docker-compose up -d
 
-# 4. Wait for database import (1-2 menit)
+# 4. Wait for database ready (1-2 menit)
 docker-compose logs -f postgres
 
-# 5. Verify
+# 5. Environment variables
+cp .env.example .env
+# Edit .env jika perlu
+
+# 6. Pre-compute quality metrics (one-time, 3 menit)
+node precompute_quality.js
+
+# 7. Start API dengan PM2 (4 cluster instances)
+pm2 start ecosystem.config.cjs
+
+# 8. Verify
 curl http://localhost:3000/health
+pm2 status
 ```
 
-**Expected response:**
+### PM2 Management
+
+```bash
+# Status
+pm2 status
+
+# Logs
+pm2 logs challenge-api
+
+# Restart
+pm2 restart challenge-api
+
+# Stop
+pm2 stop challenge-api
+
+# Auto-start on boot
+pm2 startup
+pm2 save
+```
+
+**Expected health response:**
 ```json
 {
   "status": "ready",
   "total_records": 15000000,
   "database": "connected",
-  "timestamp": "2026-08-17T10:30:45Z"
+  "timestamp": "2026-08-18T07:50:00Z"
 }
 ```
 
@@ -67,14 +101,14 @@ GET /health
 GET /api/health
 ```
 
-**Response:** (< 500ms)
+**Response:** (< 50ms)
 ```json
 {
   "status": "ready",
   "total_records": 15000000,
-  "actual_records": 14999896,
+  "actual_records": 15006935,
   "database": "connected",
-  "timestamp": "2026-08-17T10:30:45.123Z",
+  "timestamp": "2026-08-18T07:50:00.123Z",
   "ok": true
 }
 ```

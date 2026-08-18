@@ -7,11 +7,11 @@
 // Karena checker otomatis hanya menghit salah satu, SEMUA varian dipasang.
 // Biayanya beberapa baris; salah tebak biayanya satu round penuh.
 
-import cluster from 'node:cluster';
-import { cpus } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import Fastify from 'fastify';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import fastJson from 'fast-json-stringify';
 import { LRUCache } from 'lru-cache';
 
@@ -21,17 +21,8 @@ import * as Q from './queries.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
-const WORKERS = Number(process.env.WORKERS || Math.min(4, cpus().length));
 
-// Node satu thread. Tanpa cluster, 3 dari 4 core menganggur dan Round 5
-// (100 concurrent) tidak akan mencapai target.
-if (cluster.isPrimary && process.env.CLUSTER !== '0') {
-  console.log(`[primary] fork ${WORKERS} worker`);
-  for (let i = 0; i < WORKERS; i++) cluster.fork();
-  cluster.on('exit', w => { console.error(`[primary] worker ${w.process.pid} mati, fork ulang`); cluster.fork(); });
-} else {
-  start();
-}
+// PM2 handles clustering, no need for manual cluster module
 
 // ---------------------------------------------------------------------------
 // Util
@@ -98,14 +89,18 @@ function getQuality() {
 }
 
 async function computeQuality() {
+  console.log('[Quality] Starting computation...');
   const t0 = now();
-  {
-    // Dijalankan berurutan, bukan paralel. Empat agregasi berat serentak di
-    // VPS 4 core justru saling memperlambat dan pernah memicu OOM.
-    const m  = await slowQuery(Q.QUALITY_COUNTS);
-    const st = await slowQuery(Q.QUALITY_STATUS);
-    const eu = await slowQuery(Q.QUALITY_EMAIL_UNIQUE);
-    const pu = await slowQuery(Q.QUALITY_PHONE_UNIQUE);
+  
+  const client = await pool.connect();
+  try {
+    await client.query('SET statement_timeout = 90000');
+    
+    const m  = await client.query(Q.QUALITY_COUNTS);
+    const st = await client.query(Q.QUALITY_STATUS);
+    const eu = await client.query(Q.QUALITY_EMAIL_UNIQUE);
+    const pu = await client.query(Q.QUALITY_PHONE_UNIQUE);
+    
     const r = m.rows[0];
     const total = r.total;
     const pct = n => Math.round((n / total) * 10000) / 100;
@@ -113,9 +108,6 @@ async function computeQuality() {
     const distribution = {};
     for (const row of st.rows) distribution[String(row.status)] = row.n;
 
-    // quality_score: rata-rata tertimbang dari kelengkapan tiap field.
-    // Rumus dipilih sendiri (spec tidak mendefinisikan) dan didokumentasikan
-    // supaya juri bisa memverifikasi.
     const score = Math.round((
       0.35 * (r.email_present / total) +
       0.30 * (r.phone_present / total) +
@@ -123,7 +115,7 @@ async function computeQuality() {
       0.15 * ((total - r.name_missing) / total)
     ) * 10000) / 100;
 
-    qualityCache = {
+    const result = {
       total_records: total,
       analyzed_at: new Date().toISOString(),
       computed_in_ms: Math.round(ms(t0)),
@@ -152,7 +144,6 @@ async function computeQuality() {
         },
         status: { total, distribution },
       },
-      // Contoh diambil dari temuan nyata di database ini, bukan dari spec.
       data_issues: [
         { field: 'user_email', issue_type: 'phone_number_in_email_field',
           count: r.email_missing, examples: ['6285821452268', '6281542192175'],
@@ -168,7 +159,12 @@ async function computeQuality() {
           count: r.hobbies_special, examples: ['emoji, aksen non-ASCII'], severity: 'low' },
       ].filter(i => i.count > 0),
     };
-    return qualityCache;
+    
+    console.log(`[Quality] Done in ${result.computed_in_ms}ms, score: ${result.quality_score}%`);
+    return result;
+    
+  } finally {
+    client.release();
   }
 }
 
@@ -179,6 +175,46 @@ async function start() {
   const app = Fastify({ logger: false, disableRequestLogging: true });
 
   await app.register(fastifyStatic, { root: join(__dirname, 'public'), prefix: '/' });
+
+  // Swagger Documentation
+  await app.register(swagger, {
+    openapi: {
+      openapi: "3.0.0",
+      info: {
+        title: "Customer Intelligence Platform API",
+        description: "17 Agustus Coding Festival Challenge - Handles 15M customer records with high performance\n\n**GitHub:** https://github.com/russimobiledroidx/challenge17agustus",
+        version: "1.0.0"
+      },
+      servers: [
+        { url: "http://157.245.151.141:3000", description: "Production Server" },
+        { url: "http://localhost:3000", description: "Local Development" }
+      ],
+      tags: [
+        { name: "health", description: "Health check and system status" },
+        { name: "search", description: "Customer search (email, phone, name, user_id)" },
+        { name: "quality", description: "Data quality metrics" },
+        { name: "duplicates", description: "Duplicate account detection" },
+        { name: "profile", description: "User profiles with orders/transactions/activities" }
+      ]
+    },
+    hideUntagged: true,
+    exposeRoute: true
+  });
+
+  await app.register(swaggerUi, {
+    routePrefix: "/docs",
+    uiConfig: {
+      docExpansion: "list",
+      deepLinking: false
+    },
+    staticCSP: false,
+    transformStaticCSP: (header) => header,
+    
+  });
+
+
+
+
 
   // ---------------- Round 1: health ----------------
   const health = async () => {
@@ -196,11 +232,58 @@ async function start() {
       ok: true,
     };
   };
-  app.get('/health', health);
-  app.get('/api/health', health);
+  app.get('/health', { schema: { tags: ['health'], summary: 'Health check' } }, health);
+  app.get('/api/health', { schema: { tags: ['health'] } }, health);
 
   // ---------------- Round 2: search ----------------
-  app.get('/api/search', async (req, reply) => {
+  app.get('/api/search', {
+    schema: {
+      tags: ['search'],
+      summary: 'Search customers',
+      description: 'Search by email, phone, name, or user_id with pagination',
+      querystring: {
+        type: 'object',
+        required: ['q'],
+        properties: {
+          q: {
+            type: 'string',
+            description: 'Search query'
+          },
+          type: {
+            type: 'string',
+            enum: ['email', 'phone', 'user_id', 'name'],
+            default: 'name',
+            description: 'Search type'
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 100,
+            default: 10,
+            description: 'Results per page'
+          },
+          offset: {
+            type: 'integer',
+            minimum: 0,
+            default: 0,
+            description: 'Pagination offset'
+          }
+        }
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            type: { type: 'string' },
+            results: { type: 'array' },
+            total: { type: 'number' },
+            has_more: { type: 'boolean' }
+          }
+        }
+      }
+    }
+  }, async (req, reply) => {
     const t0 = now();
     const q = (req.query.q ?? '').toString().trim();
     const type = (req.query.type ?? 'name').toString().toLowerCase();
@@ -282,10 +365,49 @@ async function start() {
     return reply.code(202).send({ status: 'computing',
       message: 'Agregasi 15 juta baris sedang berjalan, coba lagi beberapa detik lagi.' });
   };
-  app.get('/api/quality', async (req, reply) => qualityOrPending(reply, q => q));
+  app.get('/api/quality', {
+    schema: {
+      tags: ['quality'],
+      summary: 'Data quality metrics',
+      description: 'Real-time analysis of 15M records (30-60s first request)',
+    }
+  }, async (req, res) => {
+    const { rows } = await pool.query('SELECT status, result, started_at FROM quality_job WHERE id=1');
+    const job = rows[0];
+
+    if (job.status === 'done' && job.result) {
+      const age = Date.now() - new Date(job.result.analyzed_at).getTime();
+      if (age < 300000) return res.send(job.result);
+    }
+
+    const stale = job.started_at ? Date.now() - new Date(job.started_at).getTime() : 0;
+    if (job.status === 'running' && stale > 120000) {
+      await pool.query("UPDATE quality_job SET status='idle' WHERE id=1");
+    }
+
+    const claim = await pool.query(
+      "UPDATE quality_job SET status='running', started_at=now() WHERE id=1 AND status='idle' RETURNING id"
+    );
+
+    if (claim.rowCount > 0) {
+      computeQuality()
+        .then(async (result) => {
+          await pool.query("UPDATE quality_job SET status='done', result=$1, updated_at=now() WHERE id=1", [result]);
+        })
+        .catch(async (err) => {
+          console.error('[Quality] Failed:', err.message);
+          await pool.query("UPDATE quality_job SET status='idle' WHERE id=1");
+        });
+    }
+
+    return res.code(202).send({
+      status: 'computing',
+      message: 'Analysis in progress (30-60s), poll again in a few seconds'
+    });
+  });
 
   // Bentuk ringkas yang diminta tabel "Required Endpoints".
-  app.get('/api/metrics', async (req, reply) => qualityOrPending(reply, qc => {
+  app.get('/api/metrics', { schema: { tags: ['quality'], summary: 'Quality summary' } }, async (req, reply) => qualityOrPending(reply, qc => {
     const m = qc.quality_metrics;
     return {
       duplicates: m.email.duplicate_count + m.phone.duplicate_count,
@@ -384,7 +506,7 @@ async function start() {
     throw new Error(`method tidak dikenal: ${method}`);
   };
 
-  app.get('/api/duplicates/find', async (req, reply) => {
+  app.get('/api/duplicates/find', { schema: { tags: ['duplicates'], summary: 'Find duplicates' } }, async (req, reply) => {
     const method = (req.query.method ?? 'ip_address').toString();
     const limit = Math.min(Math.max(parseInt(req.query.limit ?? '50', 10) || 50, 1), 200);
     const METHODS = ['ip_address', 'email', 'phone', 'order_history', 'activity_pattern'];
@@ -394,7 +516,7 @@ async function start() {
   });
 
   // Varian POST yang diminta tabel "Required Endpoints".
-  app.post('/api/duplicates', async req => {
+  app.post('/api/duplicates', { schema: { tags: ['duplicates'] } }, async req => {
     const b = req.body ?? {};
     const method = (b.method ?? 'ip_address').toString();
     const limit = Math.min(Math.max(parseInt(b.limit ?? 50, 10) || 50, 1), 200);
@@ -410,7 +532,7 @@ async function start() {
   });
 
   // Varian per-user yang disebut bagian "Submission".
-  app.get('/api/duplicates/:user_id', async (req, reply) => {
+  app.get('/api/duplicates/:user_id', { schema: { tags: ['duplicates'], summary: 'User duplicates' } }, async (req, reply) => {
     const t0 = now();
     const id = parseInt(req.params.user_id, 10);
     if (!Number.isFinite(id)) return reply.code(400).send({ error: 'user_id harus angka' });
@@ -433,7 +555,7 @@ async function start() {
   });
 
   // ---------------- Round 5: user profile (JOIN 4 tabel) ----------------
-  app.get('/api/user-profile/:user_id', async (req, reply) => {
+  app.get('/api/user-profile/:user_id', { schema: { tags: ['profile'], summary: 'User profile' } }, async (req, reply) => {
     const t0 = now();
     const id = parseInt(req.params.user_id, 10);
     if (!Number.isFinite(id)) return reply.code(400).send({ error: 'user_id harus angka' });
@@ -490,3 +612,6 @@ async function start() {
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => { await pool.end().catch(() => {}); process.exit(0); });
 }
+
+// Start server (PM2 handles clustering)
+start();
