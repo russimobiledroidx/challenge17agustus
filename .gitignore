@@ -1,3 +1,51 @@
+# Dependencies
 node_modules/
+package-lock.json
+
+# Environment
 .env
+.env.local
+
+# Logs
+*.log
 api.log
+npm-debug.log*
+
+# Backups
+*.backup
+*.bak
+*.pre-opt
+*.old
+
+# Temporary files
+*.tmp
+*.temp
+fix-*.js
+patch_*.py
+patch_*.js
+
+# Test/benchmark results
+/tmp/
+bench/*.txt
+loadtest_*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Internal docs (not for submission)
+ROUND5_LOADTEST_RESULT.md
+STATUS_SUMMARY.md
+OPTIMIZATION_PLAN_ROUND5.md
+optimizations.patch.js
+
+# Database dumps (if any)
+*.sql
+*.sql.gz
