@@ -571,7 +571,7 @@ grep "quality-bg" api.log
 
 ## 👥 Contributors
 
-- **Developer:** [Your Name]
+- **Developer:** Xavier Lewandowski Aka ( Russi Hersiano )
 - **Challenge:** 17 Agustus Coding Festival
 - **Date:** August 2026
 
