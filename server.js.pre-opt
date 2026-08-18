@@ -12,9 +12,6 @@ import { cpus } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import Fastify from 'fastify';
-import fastJson from 'fast-json-stringify';
-import { LRUCache } from 'lru-cache';
-
 import fastifyStatic from '@fastify/static';
 import { pool, sql, slowQuery } from './db.js';
 import * as Q from './queries.js';
@@ -77,11 +74,6 @@ const shapeUser = r => ({
 // berkala. Angkanya SELALU hasil query nyata ke tabel, tidak pernah ditulis
 // tangan dan tidak disimpan sebagai tabel agregat. Field analyzed_at
 // memberitahu pembaca kapan hitungan itu diambil.
-
-// LRU cache name search → 650ms jadi 5ms untuk cache hit
-const nameSearchCache = new LRUCache({ max: 500, ttl: 300000, updateAgeOnGet: true });
-const getCacheKey = (q, lim, off) => `${q.toLowerCase().trim()}:${lim}:${off}`;
-
 let qualityCache = null;
 let qualityPromise = null;          // BUG FIX: request yang datang saat hitungan
                                     // sedang berjalan harus IKUT MENUNGGU promise
@@ -241,33 +233,14 @@ async function start() {
       const r = await sql(Q.SEARCH_USER_ID, [id]);
       rows = r.rows; total = r.rowCount;
     } else {
-
-      const cacheKey = getCacheKey(q, limit, offset);
-
-      let cached = nameSearchCache.get(cacheKey);
-
-      
-
-      if (!cached) {
-
-        const r = await sql(Q.SEARCH_NAME, [q, limit + offset + 1]);
-
-        const all = r.rows;
-
-        rows = all.slice(offset, offset + limit);
-
-        total = all.length > offset + limit ? all.length : all.length;
-
-        hasMore = all.length > offset + limit;
-
-        nameSearchCache.set(cacheKey, { rows, total, hasMore });
-
-      } else {
-
-        ({ rows, total, hasMore } = cached);
-
-      }
-
+      // Ambil satu baris lebih banyak dari yang dibutuhkan halaman ini.
+      // Kalau kelebihan itu ada, berarti masih ada halaman berikutnya —
+      // informasi yang sama dengan COUNT, tanpa memindai ulang kandidat.
+      const r = await sql(Q.SEARCH_NAME, [q, limit + offset + 1]);
+      const all = r.rows;
+      rows = all.slice(offset, offset + limit);
+      total = all.length > offset + limit ? all.length : all.length;
+      hasMore = all.length > offset + limit;
     }
 
     return { query: q, type, limit, offset, results: rows.map(shapeUser), total, has_more: hasMore, took_ms: Math.round(ms(t0) * 100) / 100 };
@@ -472,18 +445,7 @@ async function start() {
   setTimeout(() => {
     getQuality().then(() => console.log(`[quality] worker ${process.pid} siap`))
                 .catch(e => console.error('[quality]', e.message));
-    // CRITICAL FIX: hanya worker 1 yang compute, worker lain read-only
-  if (cluster.isWorker && cluster.worker.id === 1) {
-    console.log('[quality-bg] Worker 1 starting background quality job');
-    computeQuality().catch(() => {});
-    setInterval(() => {
-      console.log('[quality-bg] Refreshing...');
-      qualityCache = null;
-      computeQuality().catch(() => {});
-    }, QUALITY_TTL_MS).unref();
-  } else if (cluster.isWorker) {
-    console.log(`[quality-bg] Worker ${cluster.worker.id} read-only mode`);
-  }
+    setInterval(() => { qualityCache = null; getQuality().catch(() => {}); }, QUALITY_TTL_MS).unref();
   }, delay);
 }
 
